@@ -2,7 +2,7 @@ package com.yourname.aiprep.controller;
 
 import com.yourname.aiprep.model.CourseGuide;
 import com.yourname.aiprep.model.GenerateCourseGuideRequest;
-import com.yourname.aiprep.service.GrokService;
+import com.yourname.aiprep.service.GroqService;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -12,11 +12,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api")
-public class GrokController {
+public class GroqController {
 
-    private final GrokService grokService;
+    private final GroqService grokService;
 
-    public GrokController(GrokService grokService) {
+    public GroqController(GroqService grokService) {
         this.grokService = grokService;
     }
 

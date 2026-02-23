@@ -11,7 +11,14 @@ public record CourseGuide(
     public record Module(
         String title,
         String description,
-        List<String> lessons,
-        List<String> resources
+        List<String> resources,
+        List<QuizQuestion> quizQuestions
+    ) {}
+
+    public record QuizQuestion(
+        String question,
+        List<String> options,
+        int correctIndex,
+        String explanation
     ) {}
 }
