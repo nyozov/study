@@ -96,7 +96,7 @@ public class GroqService {
         }
 
         try {
-            return shuffleQuizOptions(parseCourseGuide(jsonCandidate));
+            return parseCourseGuide(jsonCandidate);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(
                 "Failed to parse Grok response as CourseGuide. Raw content: " + summarize(content),
@@ -167,23 +167,14 @@ public class GroqService {
         Outline.ModuleOutline module
     ) {
         String detailPrompt = """
-            You are a curriculum designer. Return ONLY valid JSON for a single module focused on practice.
+            You are a curriculum designer. Return ONLY valid JSON for a single module focused on resources.
             Use this exact structure:
             {
               "title": "string",
               "description": "string",
-              "resources": ["string - book, article, or course recommendation"],
-              "quizQuestions": [
-                {
-                  "question": "string",
-                  "options": ["A", "B", "C", "D"],
-                  "correctIndex": 0,
-                  "explanation": "string"
-                }
-              ]
+              "resources": ["string - book, article, or course recommendation"]
             }
-            Generate 2 resources and 3 quiz questions. Keep JSON compact.
-            Quiz questions must be job-interview style for the role. Avoid trivia or syntax-only questions.
+            Generate 2 resources. Keep JSON compact.
             """;
 
         String userContent = String.format(
@@ -205,7 +196,7 @@ public class GroqService {
         String jsonCandidate = extractJsonObject(normalizeJson(content));
 
         try {
-            return shuffleQuizOptions(parseModule(jsonCandidate));
+            return parseModule(jsonCandidate);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(
                 "Failed to parse module response. Raw content: " + summarize(content),
@@ -219,6 +210,7 @@ public class GroqService {
             You are an interviewer. Return ONLY valid JSON:
             { "questions": ["string", "string", "string", "string", "string"] }
             Generate 5 mock interview questions tailored to the role.
+            Questions must be short-answer, practical, and role-specific. Avoid trivia or syntax-only questions.
             """;
 
         String userContent = String.format(
@@ -382,74 +374,7 @@ public class GroqService {
             || lower.contains("tokens");
     }
 
-    private CourseGuide shuffleQuizOptions(CourseGuide guide) {
-        if (guide == null || guide.modules() == null) {
-            return guide;
-        }
-
-        List<CourseGuide.Module> shuffledModules = guide.modules().stream()
-            .map(this::shuffleQuizOptions)
-            .toList();
-
-        return new CourseGuide(
-            guide.jobTitle(),
-            guide.overview(),
-            shuffledModules,
-            guide.mockInterviewQuestions()
-        );
-    }
-
-    private CourseGuide.Module shuffleQuizOptions(CourseGuide.Module module) {
-        if (module == null || module.quizQuestions() == null) {
-            return module;
-        }
-
-        List<CourseGuide.QuizQuestion> shuffledQuestions = module.quizQuestions().stream()
-            .map(this::shuffleQuizOptions)
-            .toList();
-
-        return new CourseGuide.Module(
-            module.title(),
-            module.description(),
-            module.resources(),
-            shuffledQuestions
-        );
-    }
-
-    private CourseGuide.QuizQuestion shuffleQuizOptions(CourseGuide.QuizQuestion quiz) {
-        if (quiz == null || quiz.options() == null || quiz.options().isEmpty()) {
-            return quiz;
-        }
-
-        List<String> options = new java.util.ArrayList<>(quiz.options());
-        int correctIndex = quiz.correctIndex();
-        if (correctIndex < 0 || correctIndex >= options.size()) {
-            return quiz;
-        }
-
-        List<Integer> indices = new java.util.ArrayList<>();
-        for (int i = 0; i < options.size(); i++) {
-            indices.add(i);
-        }
-        java.util.Collections.shuffle(indices);
-
-        List<String> shuffledOptions = new java.util.ArrayList<>();
-        int newCorrectIndex = 0;
-        for (int i = 0; i < indices.size(); i++) {
-            int originalIndex = indices.get(i);
-            shuffledOptions.add(options.get(originalIndex));
-            if (originalIndex == correctIndex) {
-                newCorrectIndex = i;
-            }
-        }
-
-        return new CourseGuide.QuizQuestion(
-            quiz.question(),
-            shuffledOptions,
-            newCorrectIndex,
-            quiz.explanation()
-        );
-    }
+    // MCQ flow removed; short-answer interview questions only.
 
     private String extractContent(Map<?, ?> response) {
         if (response == null) {
@@ -625,43 +550,25 @@ public class GroqService {
                 {
                   "title": "string",
                   "description": "string",
-                  "resources": ["string - book, article, or course recommendation"],
-                  "quizQuestions": [
-                    {
-                      "question": "string",
-                      "options": ["A", "B", "C", "D"],
-                      "correctIndex": 0,
-                      "explanation": "string"
-                    }
-                  ]
+                  "resources": ["string - book, article, or course recommendation"]
                 }
               ],
               "mockInterviewQuestions": ["string", "string", "string"]
             }
-            Generate 3-4 modules and 4-6 quiz questions per module.
-            Each quiz question must include exactly 4 options, a 0-based correctIndex, and a 1-sentence explanation.
-            Make the correct option unambiguously correct. The other 3 options must be clearly incorrect, not merely less precise.
-            Avoid subjective or multi-correct questions. Prefer role-relevant, job-interview style questions over trivia or syntax-only questions.
-            Generate 6-8 interview questions.
+            Generate 3-4 modules. Generate 6-8 interview-style questions.
             """;
 
         if (compactLevel >= 1) {
             base = base.replace(
-                "Generate 3-4 modules and 4-6 quiz questions per module.",
-                "Generate 3 modules and 3 quiz questions per module."
-            ).replace(
-                "Generate 6-8 interview questions.",
-                "Generate 5 interview questions."
+                "Generate 3-4 modules. Generate 6-8 interview-style questions.",
+                "Generate 3 modules. Generate 5 interview-style questions."
             );
         }
 
         if (compactLevel >= 2) {
             base = base.replace(
-                "Generate 3 modules and 3 quiz questions per module.",
-                "Generate 2 modules and 2 quiz questions per module."
-            ).replace(
-                "Generate 5 interview questions.",
-                "Generate 4 interview questions."
+                "Generate 3 modules. Generate 5 interview-style questions.",
+                "Generate 2 modules. Generate 4 interview-style questions."
             );
         }
 
