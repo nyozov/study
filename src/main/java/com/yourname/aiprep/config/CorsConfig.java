@@ -12,6 +12,19 @@ public class CorsConfig implements WebMvcConfigurer {
             .allowedOrigins("http://localhost:3000", "http://localhost:3001")
             .allowedMethods("GET", "POST", "OPTIONS")
             .allowedHeaders("*")
-            .exposedHeaders("X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset");
+            .exposedHeaders(
+                "X-RateLimit-Limit",
+                "X-RateLimit-Remaining",
+                "X-RateLimit-Reset",
+                "X-RateLimit-Minute-Limit",
+                "X-RateLimit-Minute-Remaining",
+                "X-RateLimit-Minute-Reset",
+                "X-RateLimit-Hour-Limit",
+                "X-RateLimit-Hour-Remaining",
+                "X-RateLimit-Hour-Reset",
+                "X-RateLimit-Day-Limit",
+                "X-RateLimit-Day-Remaining",
+                "X-RateLimit-Day-Reset"
+            );
     }
 }

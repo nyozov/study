@@ -37,6 +37,15 @@ public class RateLimitFilter extends OncePerRequestFilter {
         response.setHeader("X-RateLimit-Limit", String.valueOf(status.limit()));
         response.setHeader("X-RateLimit-Remaining", String.valueOf(status.remaining()));
         response.setHeader("X-RateLimit-Reset", String.valueOf(status.resetSeconds()));
+        response.setHeader("X-RateLimit-Minute-Limit", String.valueOf(status.minute().limit()));
+        response.setHeader("X-RateLimit-Minute-Remaining", String.valueOf(status.minute().remaining()));
+        response.setHeader("X-RateLimit-Minute-Reset", String.valueOf(status.minute().resetSeconds()));
+        response.setHeader("X-RateLimit-Hour-Limit", String.valueOf(status.hour().limit()));
+        response.setHeader("X-RateLimit-Hour-Remaining", String.valueOf(status.hour().remaining()));
+        response.setHeader("X-RateLimit-Hour-Reset", String.valueOf(status.hour().resetSeconds()));
+        response.setHeader("X-RateLimit-Day-Limit", String.valueOf(status.day().limit()));
+        response.setHeader("X-RateLimit-Day-Remaining", String.valueOf(status.day().remaining()));
+        response.setHeader("X-RateLimit-Day-Reset", String.valueOf(status.day().resetSeconds()));
 
         if (!status.allowed()) {
             response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
