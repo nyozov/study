@@ -2,6 +2,7 @@ package com.yourname.aiprep.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourname.aiprep.model.CourseGuide;
 import java.util.HashMap;
@@ -492,11 +493,47 @@ public class GroqService {
                 .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(
-                json,
-                com.yourname.aiprep.model.IdealAnswerResponse.class
-            );
+            JsonNode node = lenient.readTree(json);
+            JsonNode answerNode = node.has("answer") ? node.get("answer") : node;
+            String answer = coerceAnswer(answerNode);
+            return new com.yourname.aiprep.model.IdealAnswerResponse(answer);
         }
+    }
+
+    private String coerceAnswer(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        if (node.isTextual()) {
+            return node.asText();
+        }
+        if (node.isArray()) {
+            StringBuilder builder = new StringBuilder();
+            for (JsonNode item : node) {
+                String text = coerceAnswer(item);
+                if (!text.isBlank()) {
+                    if (!builder.isEmpty()) {
+                        builder.append(" ");
+                    }
+                    builder.append(text.trim());
+                }
+            }
+            return builder.toString().trim();
+        }
+        if (node.isObject()) {
+            StringBuilder builder = new StringBuilder();
+            node.fields().forEachRemaining(entry -> {
+                String value = coerceAnswer(entry.getValue());
+                if (!value.isBlank()) {
+                    if (!builder.isEmpty()) {
+                        builder.append(" ");
+                    }
+                    builder.append(entry.getKey()).append(": ").append(value.trim()).append(".");
+                }
+            });
+            return builder.toString().trim();
+        }
+        return node.asText();
     }
 
     private Outline parseOutline(String json) throws JsonProcessingException {

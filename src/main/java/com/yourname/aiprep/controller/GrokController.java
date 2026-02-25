@@ -12,11 +12,11 @@ import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api")
-public class GroqController {
+public class GrokController {
 
     private final GroqService grokService;
 
-    public GroqController(GroqService grokService) {
+    public GrokController(GroqService grokService) {
         this.grokService = grokService;
     }
 
