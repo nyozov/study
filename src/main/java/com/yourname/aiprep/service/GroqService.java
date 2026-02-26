@@ -8,10 +8,11 @@ import com.yourname.aiprep.model.IdealAnswerResponse;
 import com.yourname.aiprep.model.MockInterviewSession;
 import com.yourname.aiprep.model.ReviewAnswerRequest;
 import com.yourname.aiprep.model.ReviewAnswerResponse;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -20,8 +21,21 @@ import org.springframework.web.client.RestClientResponseException;
 
 @Service
 public class GroqService {
+
+    private static final Logger log = LoggerFactory.getLogger(GroqService.class);
+
     private static final String PRIMARY_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
     private static final String FALLBACK_MODEL = "groq/compound";
+    private static final int MAX_PROMPT_CHARS = 4000;
+
+    // Retry ladder: each entry is (strictJson, compactLevel, maxTokens, progressMessage)
+    private record RetryConfig(boolean strict, int compactLevel, int maxTokens, String progressMessage) {}
+    private static final List<RetryConfig> INTERVIEW_RETRY_LADDER = List.of(
+        new RetryConfig(false, 0, 700, "Analyzing the role..."),
+        new RetryConfig(true,  0, 650, "Retrying with stricter JSON..."),
+        new RetryConfig(true,  1, 520, "Retrying with fewer questions..."),
+        new RetryConfig(true,  2, 420, "Final retry with compact output...")
+    );
 
     @Value("${groq.api.key}")
     private String apiKey;
@@ -37,76 +51,19 @@ public class GroqService {
         this.objectMapper = objectMapper;
     }
 
+    // -------------------------------------------------------------------------
+    // Public API
+    // -------------------------------------------------------------------------
+
     public MockInterviewSession generateMockInterviewSession(String userPrompt) {
-        String safePrompt = truncate(userPrompt, 4000);
-        try {
-            return requestMockInterviewSession(buildInterviewPrompt(false, 0), safePrompt, 700);
-        } catch (IllegalStateException ex) {
-            try {
-                return requestMockInterviewSession(buildInterviewPrompt(true, 0), safePrompt, 650);
-            } catch (IllegalStateException retryEx) {
-                try {
-                    return requestMockInterviewSession(buildInterviewPrompt(true, 1), safePrompt, 520);
-                } catch (IllegalStateException compactEx) {
-                    return requestMockInterviewSession(buildInterviewPrompt(true, 2), safePrompt, 420);
-                }
-            }
-        }
+        return generateWithRetry(userPrompt, null);
     }
 
     public MockInterviewSession generateMockInterviewSessionWithProgress(
         String userPrompt,
         Consumer<String> progress
     ) {
-        progress.accept("Analyzing the role...");
-        try {
-            return requestMockInterviewSession(buildInterviewPrompt(false, 0), userPrompt, 700);
-        } catch (IllegalStateException ex) {
-            progress.accept("Retrying with stricter JSON...");
-            try {
-                return requestMockInterviewSession(buildInterviewPrompt(true, 0), userPrompt, 650);
-            } catch (IllegalStateException retryEx) {
-                progress.accept("Retrying with fewer questions...");
-                try {
-                    return requestMockInterviewSession(buildInterviewPrompt(true, 1), userPrompt, 520);
-                } catch (IllegalStateException compactEx) {
-                    progress.accept("Final retry with compact output...");
-                    return requestMockInterviewSession(buildInterviewPrompt(true, 2), userPrompt, 420);
-                }
-            }
-        }
-    }
-
-    private MockInterviewSession requestMockInterviewSession(
-        String systemPrompt,
-        String userPrompt,
-        int maxTokens
-    ) {
-        List<Map<String, String>> messages = List.of(
-            Map.of("role", "system", "content", systemPrompt),
-            Map.of("role", "user", "content", "Job Description:\n" + userPrompt)
-        );
-
-        Map<?, ?> response = postChat(messages, 0.4, maxTokens);
-
-        String content = extractContent(response);
-        String normalizedJson = normalizeJson(content);
-        String jsonCandidate = extractJsonObject(normalizedJson);
-
-        if (!isLikelyCompleteJson(jsonCandidate)) {
-            throw new IllegalStateException(
-                "Likely truncated JSON. Raw content: " + summarize(content)
-            );
-        }
-
-        try {
-            return parseMockInterviewSession(jsonCandidate);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse mock interview session. Raw content: " + summarize(content),
-                e
-            );
-        }
+        return generateWithRetry(userPrompt, progress);
     }
 
     public ReviewAnswerResponse reviewMockAnswer(ReviewAnswerRequest request) {
@@ -122,31 +79,17 @@ public class GroqService {
             Keep the summary to 2-4 sentences. Strengths and improvements should be concrete and actionable.
             """;
 
-        String userContent = String.format(
-            "Role: %s%nQuestion: %s%nAnswer: %s",
-            request.jobTitle() == null ? "" : request.jobTitle(),
-            request.question() == null ? "" : request.question(),
-            request.answer() == null ? "" : request.answer()
+        String userContent = "Role: %s%nQuestion: %s%nAnswer: %s".formatted(
+            nullSafe(request.jobTitle()),
+            nullSafe(request.question()),
+            nullSafe(request.answer())
         );
 
-        List<Map<String, String>> messages = List.of(
-            Map.of("role", "system", "content", systemPrompt),
-            Map.of("role", "user", "content", userContent)
-        );
-
-        Map<?, ?> response = postChat(messages, 0.3, null);
-
-        String content = extractContent(response);
-        String normalizedJson = normalizeJson(content);
-        String jsonCandidate = extractJsonObject(normalizedJson);
-
+        String json = callAndExtractJson(systemPrompt, userContent, 0.3, null);
         try {
-            return parseReview(jsonCandidate);
+            return parseWithFallback(json, ReviewAnswerResponse.class);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse review response. Raw content: " + summarize(content),
-                e
-            );
+            throw new IllegalStateException("Failed to parse review response. Raw: " + summarize(json), e);
         }
     }
 
@@ -158,31 +101,81 @@ public class GroqService {
             Keep the answer under 180 words. Use clear, practical language.
             """;
 
-        String userContent = String.format(
-            "Role: %s%nQuestion: %s",
-            request.jobTitle() == null ? "" : request.jobTitle(),
-            request.question() == null ? "" : request.question()
+        String userContent = "Role: %s%nQuestion: %s".formatted(
+            nullSafe(request.jobTitle()),
+            nullSafe(request.question())
         );
 
+        String json = callAndExtractJson(systemPrompt, userContent, 0.2, 350);
+        try {
+            return parseIdealAnswer(json);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to parse ideal answer. Raw: " + summarize(json), e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Core retry logic
+    // -------------------------------------------------------------------------
+
+    private MockInterviewSession generateWithRetry(String userPrompt, Consumer<String> progress) {
+        String safePrompt = truncate(userPrompt, MAX_PROMPT_CHARS);
+        IllegalStateException lastError = null;
+
+        for (RetryConfig config : INTERVIEW_RETRY_LADDER) {
+            notify(progress, config.progressMessage());
+            try {
+                return requestMockInterviewSession(
+                    buildInterviewPrompt(config.strict(), config.compactLevel()),
+                    safePrompt,
+                    config.maxTokens()
+                );
+            } catch (IllegalStateException e) {
+                log.warn("Interview generation attempt failed (strict={}, compact={}): {}",
+                    config.strict(), config.compactLevel(), e.getMessage());
+                lastError = e;
+            }
+        }
+        throw lastError;
+    }
+
+    private MockInterviewSession requestMockInterviewSession(
+        String systemPrompt,
+        String userPrompt,
+        int maxTokens
+    ) {
+        String json = callAndExtractJson(
+            systemPrompt,
+            "Job Description:\n" + userPrompt,
+            0.4,
+            maxTokens
+        );
+
+        try {
+            return parseWithFallback(json, MockInterviewSession.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(
+                "Failed to parse mock interview session. Raw: " + summarize(json), e);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // HTTP
+    // -------------------------------------------------------------------------
+
+    private String callAndExtractJson(
+        String systemPrompt,
+        String userContent,
+        double temperature,
+        Integer maxTokens
+    ) {
         List<Map<String, String>> messages = List.of(
             Map.of("role", "system", "content", systemPrompt),
             Map.of("role", "user", "content", userContent)
         );
-
-        Map<?, ?> response = postChat(messages, 0.2, 350);
-
+        Map<?, ?> response = postChat(messages, temperature, maxTokens);
         String content = extractContent(response);
-        String normalizedJson = normalizeJson(content);
-        String jsonCandidate = extractJsonObject(normalizedJson);
-
-        try {
-            return parseIdealAnswer(jsonCandidate);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse ideal answer. Raw content: " + summarize(content),
-                e
-            );
-        }
+        return extractJsonObject(normalizeJson(content));
     }
 
     private Map<?, ?> postChat(
@@ -194,6 +187,7 @@ public class GroqService {
             return postChatWithModel(PRIMARY_MODEL, messages, temperature, maxTokens);
         } catch (RestClientResponseException e) {
             if (isQuotaError(e)) {
+                log.warn("Primary model quota exceeded, falling back to {}", FALLBACK_MODEL);
                 return postChatWithModel(FALLBACK_MODEL, messages, temperature, maxTokens);
             }
             throw e;
@@ -206,7 +200,7 @@ public class GroqService {
         double temperature,
         Integer maxTokens
     ) {
-        Map<String, Object> body = new HashMap<>();
+        var body = new java.util.HashMap<String, Object>();
         body.put("model", model);
         body.put("messages", messages);
         body.put("temperature", temperature);
@@ -225,48 +219,94 @@ public class GroqService {
 
     private boolean isQuotaError(RestClientResponseException e) {
         int status = e.getRawStatusCode();
-        if (status == 429 || status == 402 || status == 403) {
-            return true;
-        }
+        if (status == 429 || status == 402) return true;
         String body = e.getResponseBodyAsString();
-        if (body == null) {
-            return false;
-        }
+        if (body == null) return false;
         String lower = body.toLowerCase();
-        return lower.contains("rate limit")
-            || lower.contains("quota")
-            || lower.contains("exceeded")
-            || lower.contains("insufficient")
-            || lower.contains("tokens");
+        return lower.contains("rate_limit_exceeded")
+            || lower.contains("insufficient_quota")
+            || lower.contains("quota_exceeded");
     }
 
+    // -------------------------------------------------------------------------
+    // Response parsing
+    // -------------------------------------------------------------------------
+
     private String extractContent(Map<?, ?> response) {
-        if (response == null) {
-            throw new IllegalStateException("Empty groq response");
-        }
+        if (response == null) throw new IllegalStateException("Empty Groq response");
 
-        Object choicesObj = response.get("choices");
-        if (!(choicesObj instanceof List<?> choices) || choices.isEmpty()) {
-            throw new IllegalStateException("groq response missing choices");
-        }
+        if (!(response.get("choices") instanceof List<?> choices) || choices.isEmpty())
+            throw new IllegalStateException("Groq response missing choices");
 
-        Object firstChoice = choices.get(0);
-        if (!(firstChoice instanceof Map<?, ?> firstChoiceMap)) {
-            throw new IllegalStateException("groq response choice is not an object");
-        }
+        if (!(choices.get(0) instanceof Map<?, ?> choice))
+            throw new IllegalStateException("Groq choice is not an object");
 
-        Object messageObj = firstChoiceMap.get("message");
-        if (!(messageObj instanceof Map<?, ?> messageMap)) {
-            throw new IllegalStateException("groq response missing message");
-        }
+        if (!(choice.get("message") instanceof Map<?, ?> message))
+            throw new IllegalStateException("Groq response missing message");
 
-        Object contentObj = messageMap.get("content");
-        if (!(contentObj instanceof String content)) {
-            throw new IllegalStateException("groq response content is not a string");
-        }
+        if (!(message.get("content") instanceof String content))
+            throw new IllegalStateException("Groq response content is not a string");
 
         return content;
     }
+
+    private <T> T parseWithFallback(String json, Class<T> type) throws JsonProcessingException {
+        try {
+            return objectMapper.readValue(json, type);
+        } catch (JsonProcessingException e) {
+            return lenientMapper().readValue(json, type);
+        }
+    }
+
+    private IdealAnswerResponse parseIdealAnswer(String json) throws JsonProcessingException {
+        try {
+            return objectMapper.readValue(json, IdealAnswerResponse.class);
+        } catch (JsonProcessingException e) {
+            JsonNode node = lenientMapper().readTree(json);
+            String answer = coerceAnswer(node.has("answer") ? node.get("answer") : node);
+            return new IdealAnswerResponse(answer);
+        }
+    }
+
+    private ObjectMapper lenientMapper() {
+        return objectMapper.copy()
+            .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
+            .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
+    }
+
+    private String coerceAnswer(JsonNode node) {
+        if (node == null || node.isNull()) return "";
+        if (node.isTextual()) return node.asText();
+        if (node.isArray()) {
+            StringBuilder sb = new StringBuilder();
+            for (JsonNode item : node) {
+                String text = coerceAnswer(item);
+                if (!text.isBlank()) {
+                    if (!sb.isEmpty()) sb.append(" ");
+                    sb.append(text.trim());
+                }
+            }
+            return sb.toString().trim();
+        }
+        if (node.isObject()) {
+            StringBuilder sb = new StringBuilder();
+            node.fields().forEachRemaining(entry -> {
+                String value = coerceAnswer(entry.getValue());
+                if (!value.isBlank()) {
+                    if (!sb.isEmpty()) sb.append(" ");
+                    sb.append(entry.getKey()).append(": ").append(value.trim()).append(".");
+                }
+            });
+            return sb.toString().trim();
+        }
+        return node.asText();
+    }
+
+    // -------------------------------------------------------------------------
+    // JSON utilities
+    // -------------------------------------------------------------------------
 
     private String normalizeJson(String content) {
         String trimmed = content == null ? "" : content.trim();
@@ -281,117 +321,26 @@ public class GroqService {
     }
 
     private String extractJsonObject(String content) {
-        if (content == null) {
-            return "";
-        }
-
+        if (content == null) return "";
         String trimmed = content.trim();
-        if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-            return trimmed;
-        }
-
-        int firstBrace = trimmed.indexOf('{');
-        int lastBrace = trimmed.lastIndexOf('}');
-        if (firstBrace >= 0 && lastBrace > firstBrace) {
-            return trimmed.substring(firstBrace, lastBrace + 1).trim();
-        }
-
-        return trimmed;
+        if (trimmed.startsWith("{") && trimmed.endsWith("}")) return trimmed;
+        int first = trimmed.indexOf('{');
+        int last = trimmed.lastIndexOf('}');
+        return (first >= 0 && last > first) ? trimmed.substring(first, last + 1).trim() : trimmed;
     }
 
-    private String summarize(String content) {
-        if (content == null) {
-            return "<null>";
-        }
-        String sanitized = content.replaceAll("\\s+", " ").trim();
-        if (sanitized.length() <= 500) {
-            return sanitized;
-        }
-        return sanitized.substring(0, 500) + "...";
-    }
-
-    private MockInterviewSession parseMockInterviewSession(String json)
-        throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, MockInterviewSession.class);
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, MockInterviewSession.class);
-        }
-    }
-
-    private ReviewAnswerResponse parseReview(String json)
-        throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, ReviewAnswerResponse.class);
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, ReviewAnswerResponse.class);
-        }
-    }
-
-    private IdealAnswerResponse parseIdealAnswer(String json)
-        throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, IdealAnswerResponse.class);
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            JsonNode node = lenient.readTree(json);
-            JsonNode answerNode = node.has("answer") ? node.get("answer") : node;
-            String answer = coerceAnswer(answerNode);
-            return new IdealAnswerResponse(answer);
-        }
-    }
-
-    private String coerceAnswer(JsonNode node) {
-        if (node == null || node.isNull()) {
-            return "";
-        }
-        if (node.isTextual()) {
-            return node.asText();
-        }
-        if (node.isArray()) {
-            StringBuilder builder = new StringBuilder();
-            for (JsonNode item : node) {
-                String text = coerceAnswer(item);
-                if (!text.isBlank()) {
-                    if (!builder.isEmpty()) {
-                        builder.append(" ");
-                    }
-                    builder.append(text.trim());
-                }
-            }
-            return builder.toString().trim();
-        }
-        if (node.isObject()) {
-            StringBuilder builder = new StringBuilder();
-            node.fields().forEachRemaining(entry -> {
-                String value = coerceAnswer(entry.getValue());
-                if (!value.isBlank()) {
-                    if (!builder.isEmpty()) {
-                        builder.append(" ");
-                    }
-                    builder.append(entry.getKey()).append(": ").append(value.trim()).append(".");
-                }
-            });
-            return builder.toString().trim();
-        }
-        return node.asText();
-    }
+    // -------------------------------------------------------------------------
+    // Prompt building
+    // -------------------------------------------------------------------------
 
     private String buildInterviewPrompt(boolean strictJson, int compactLevel) {
+        int questionCount = switch (compactLevel) {
+            case 2 -> 5;
+            case 1 -> 6;
+            default -> 8;
+        };
+        String countLabel = compactLevel == 0 ? "8-10" : String.valueOf(questionCount);
+
         String base = """
             You are a senior interviewer. Return ONLY valid JSON.
             Use this exact structure:
@@ -399,30 +348,14 @@ public class GroqService {
               "jobTitle": "string",
               "questions": ["string", "string", "string"]
             }
-            Generate 8-10 short-answer interview questions tailored to the role.
+            Generate %s short-answer interview questions tailored to the role.
             Include exactly 5 technical questions based on the job description's required tools/stack.
             The rest can be experience, leadership, or problem-solving questions.
             Technical questions should be concrete (e.g., if React is required, ask about useMemo, hydration vs render, state management tradeoffs).
             Avoid trivia or syntax-only questions.
-            """;
+            """.formatted(countLabel);
 
-        if (compactLevel >= 1) {
-            base = base.replace(
-                "Generate 8-10 short-answer interview questions tailored to the role.",
-                "Generate 6 short-answer interview questions tailored to the role."
-            );
-        }
-
-        if (compactLevel >= 2) {
-            base = base.replace(
-                "Generate 6 short-answer interview questions tailored to the role.",
-                "Generate 5 short-answer interview questions tailored to the role."
-            );
-        }
-
-        if (!strictJson) {
-            return base;
-        }
+        if (!strictJson) return base;
 
         return base + """
 
@@ -431,41 +364,27 @@ public class GroqService {
             """;
     }
 
-    private String truncate(String value, int max) {
-        if (value == null) {
-            return "";
-        }
+    // -------------------------------------------------------------------------
+    // Misc helpers
+    // -------------------------------------------------------------------------
+
+    private static String truncate(String value, int max) {
+        if (value == null) return "";
         String trimmed = value.trim();
-        if (trimmed.length() <= max) {
-            return trimmed;
-        }
-        return trimmed.substring(0, max) + "...";
+        return trimmed.length() <= max ? trimmed : trimmed.substring(0, max) + "...";
     }
 
-    private boolean isLikelyCompleteJson(String content) {
-        if (content == null) {
-            return false;
-        }
-        String trimmed = content.trim();
-        if (!trimmed.startsWith("{")) {
-            return false;
-        }
-        int depth = 0;
-        boolean inString = false;
-        for (int i = 0; i < trimmed.length(); i++) {
-            char c = trimmed.charAt(i);
-            if (c == '"' && (i == 0 || trimmed.charAt(i - 1) != '\\')) {
-                inString = !inString;
-            }
-            if (inString) {
-                continue;
-            }
-            if (c == '{') {
-                depth++;
-            } else if (c == '}') {
-                depth--;
-            }
-        }
-        return depth == 0 && trimmed.endsWith("}");
+    private static String summarize(String content) {
+        if (content == null) return "<null>";
+        String s = content.replaceAll("\\s+", " ").trim();
+        return s.length() <= 500 ? s : s.substring(0, 500) + "...";
+    }
+
+    private static String nullSafe(String value) {
+        return value == null ? "" : value;
+    }
+
+    private static void notify(Consumer<String> progress, String message) {
+        if (progress != null) progress.accept(message);
     }
 }
