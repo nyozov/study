@@ -19,9 +19,6 @@ public class CorsConfig implements WebMvcConfigurer {
                 "X-RateLimit-Minute-Limit",
                 "X-RateLimit-Minute-Remaining",
                 "X-RateLimit-Minute-Reset",
-                "X-RateLimit-Hour-Limit",
-                "X-RateLimit-Hour-Remaining",
-                "X-RateLimit-Hour-Reset",
                 "X-RateLimit-Day-Limit",
                 "X-RateLimit-Day-Remaining",
                 "X-RateLimit-Day-Reset"

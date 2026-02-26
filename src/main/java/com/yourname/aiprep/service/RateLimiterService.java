@@ -20,12 +20,6 @@ public class RateLimiterService {
     @Value("${rate-limit.window-minute-seconds}")
     private long windowMinuteSeconds;
 
-    @Value("${rate-limit.max-requests-per-hour}")
-    private int maxRequestsPerHour;
-
-    @Value("${rate-limit.window-hour-seconds:3600}")
-    private long windowHourSeconds;
-
     @Value("${rate-limit.max-requests-per-day}")
     private int maxRequestsPerDay;
 
@@ -38,11 +32,10 @@ public class RateLimiterService {
 
     public RateLimitStatus consume(String ip) {
         WindowStatus minute = consumeWindow("rate_limit:minute:" + ip, maxRequestsPerMinute, windowMinuteSeconds);
-        WindowStatus hour = consumeWindow("rate_limit:hour:" + ip, maxRequestsPerHour, windowHourSeconds);
         WindowStatus day = consumeWindow("rate_limit:day:" + ip, maxRequestsPerDay, windowDaySeconds);
 
-        boolean allowed = minute.allowed() && hour.allowed() && day.allowed();
-        WindowStatus primary = pickPrimary(minute, hour, day);
+        boolean allowed = minute.allowed() && day.allowed();
+        WindowStatus primary = pickPrimary(minute, day);
 
         return new RateLimitStatus(
             allowed,
@@ -50,7 +43,6 @@ public class RateLimiterService {
             primary.remaining(),
             primary.resetSeconds(),
             minute,
-            hour,
             day
         );
     }
@@ -101,7 +93,6 @@ public class RateLimiterService {
         long remaining,
         long resetSeconds,
         WindowStatus minute,
-        WindowStatus hour,
         WindowStatus day
     ) {}
 
