@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.json.JsonReadFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourname.aiprep.model.CourseGuide;
+import com.yourname.aiprep.model.IdealAnswerResponse;
+import com.yourname.aiprep.model.MockInterviewSession;
+import com.yourname.aiprep.model.ReviewAnswerRequest;
+import com.yourname.aiprep.model.ReviewAnswerResponse;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,10 +23,10 @@ public class GroqService {
     private static final String PRIMARY_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
     private static final String FALLBACK_MODEL = "groq/compound";
 
-    @Value("${grok.api.key}")
+    @Value("${groq.api.key}")
     private String apiKey;
 
-    @Value("${grok.api.url}")
+    @Value("${groq.api.url}")
     private String apiUrl;
 
     private final RestClient restClient;
@@ -34,57 +37,57 @@ public class GroqService {
         this.objectMapper = objectMapper;
     }
 
-    public CourseGuide generateCourseGuide(String userPrompt) {
+    public MockInterviewSession generateMockInterviewSession(String userPrompt) {
         String safePrompt = truncate(userPrompt, 4000);
         try {
-            return requestCourseGuide(buildCourseGuidePrompt(false, 0), safePrompt, 2400);
+            return requestMockInterviewSession(buildInterviewPrompt(false, 0), safePrompt, 700);
         } catch (IllegalStateException ex) {
             try {
-                return requestCourseGuide(buildCourseGuidePrompt(true, 0), safePrompt, 2200);
+                return requestMockInterviewSession(buildInterviewPrompt(true, 0), safePrompt, 650);
             } catch (IllegalStateException retryEx) {
                 try {
-                    return requestCourseGuide(buildCourseGuidePrompt(true, 1), safePrompt, 1600);
+                    return requestMockInterviewSession(buildInterviewPrompt(true, 1), safePrompt, 520);
                 } catch (IllegalStateException compactEx) {
-                    try {
-                        return requestCourseGuide(buildCourseGuidePrompt(true, 2), safePrompt, 1200);
-                    } catch (IllegalStateException finalEx) {
-                        return requestCourseGuideTwoStep(safePrompt, msg -> {});
-                    }
+                    return requestMockInterviewSession(buildInterviewPrompt(true, 2), safePrompt, 420);
                 }
             }
         }
     }
 
-    public CourseGuide generateCourseGuideWithProgress(
+    public MockInterviewSession generateMockInterviewSessionWithProgress(
         String userPrompt,
         Consumer<String> progress
     ) {
-        progress.accept("Starting course generation...");
+        progress.accept("Analyzing the role...");
         try {
-            return requestCourseGuide(buildCourseGuidePrompt(false, 0), userPrompt, 2400);
+            return requestMockInterviewSession(buildInterviewPrompt(false, 0), userPrompt, 700);
         } catch (IllegalStateException ex) {
             progress.accept("Retrying with stricter JSON...");
             try {
-                return requestCourseGuide(buildCourseGuidePrompt(true, 0), userPrompt, 2200);
+                return requestMockInterviewSession(buildInterviewPrompt(true, 0), userPrompt, 650);
             } catch (IllegalStateException retryEx) {
-                progress.accept("Retrying with compact output...");
+                progress.accept("Retrying with fewer questions...");
                 try {
-                    return requestCourseGuide(buildCourseGuidePrompt(true, 1), userPrompt, 1600);
+                    return requestMockInterviewSession(buildInterviewPrompt(true, 1), userPrompt, 520);
                 } catch (IllegalStateException compactEx) {
-                    progress.accept("Switching to step-by-step generation...");
-                    return requestCourseGuideTwoStep(userPrompt, progress);
+                    progress.accept("Final retry with compact output...");
+                    return requestMockInterviewSession(buildInterviewPrompt(true, 2), userPrompt, 420);
                 }
             }
         }
     }
 
-    private CourseGuide requestCourseGuide(String systemPrompt, String userPrompt, int maxTokens) {
+    private MockInterviewSession requestMockInterviewSession(
+        String systemPrompt,
+        String userPrompt,
+        int maxTokens
+    ) {
         List<Map<String, String>> messages = List.of(
             Map.of("role", "system", "content", systemPrompt),
-            Map.of("role", "user", "content", "User Prompt:\n" + userPrompt)
+            Map.of("role", "user", "content", "Job Description:\n" + userPrompt)
         );
 
-        Map<?, ?> response = postChat(messages, 0.6, maxTokens);
+        Map<?, ?> response = postChat(messages, 0.4, maxTokens);
 
         String content = extractContent(response);
         String normalizedJson = normalizeJson(content);
@@ -97,152 +100,16 @@ public class GroqService {
         }
 
         try {
-            return parseCourseGuide(jsonCandidate);
+            return parseMockInterviewSession(jsonCandidate);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException(
-                "Failed to parse Grok response as CourseGuide. Raw content: " + summarize(content),
+                "Failed to parse mock interview session. Raw content: " + summarize(content),
                 e
             );
         }
     }
 
-    private CourseGuide requestCourseGuideTwoStep(String userPrompt, Consumer<String> progress) {
-        String outlinePrompt = """
-            You are a curriculum designer. Return ONLY valid JSON for a compact outline.
-            Structure:
-            {
-              "jobTitle": "string",
-              "overview": "string",
-              "modules": [
-                { "title": "string", "description": "string" }
-              ]
-            }
-            Generate 3 modules with short descriptions. Keep the JSON compact.
-            """;
-
-        List<Map<String, String>> outlineMessages = List.of(
-            Map.of("role", "system", "content", outlinePrompt),
-            Map.of("role", "user", "content", "User Prompt:\n" + userPrompt)
-        );
-
-        Map<?, ?> outlineResponse = postChat(outlineMessages, 0.4, 700);
-
-        String outlineContent = extractContent(outlineResponse);
-        String outlineJson = extractJsonObject(normalizeJson(outlineContent));
-
-        Outline outline;
-        try {
-            outline = parseOutline(outlineJson);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse outline response. Raw content: " + summarize(outlineContent),
-                e
-            );
-        }
-
-        List<Outline.ModuleOutline> outlineModules = outline.modules() == null
-            ? List.of()
-            : outline.modules();
-        List<CourseGuide.Module> modules = new java.util.ArrayList<>();
-        int total = outlineModules.size();
-        for (int i = 0; i < total; i++) {
-            Outline.ModuleOutline module = outlineModules.get(i);
-            progress.accept("Generating module " + (i + 1) + " of " + total + "...");
-            modules.add(generateModuleDetail(userPrompt, outline.jobTitle(), module));
-        }
-
-        progress.accept("Generating mock interview questions...");
-        List<String> interviewQuestions = generateInterviewQuestions(userPrompt, outline.jobTitle());
-
-        return new CourseGuide(
-            outline.jobTitle(),
-            outline.overview(),
-            modules,
-            interviewQuestions
-        );
-    }
-
-    private CourseGuide.Module generateModuleDetail(
-        String userPrompt,
-        String jobTitle,
-        Outline.ModuleOutline module
-    ) {
-        String detailPrompt = """
-            You are a curriculum designer. Return ONLY valid JSON for a single module focused on resources.
-            Use this exact structure:
-            {
-              "title": "string",
-              "description": "string",
-              "resources": ["string - book, article, or course recommendation"]
-            }
-            Generate 2 resources. Keep JSON compact.
-            """;
-
-        String userContent = String.format(
-            "Job Title: %s%nModule Title: %s%nModule Description: %s%nJob Description:%n%s",
-            jobTitle == null ? "" : jobTitle,
-            module.title(),
-            module.description(),
-            userPrompt
-        );
-
-        List<Map<String, String>> messages = List.of(
-            Map.of("role", "system", "content", detailPrompt),
-            Map.of("role", "user", "content", userContent)
-        );
-
-        Map<?, ?> response = postChat(messages, 0.5, 1200);
-
-        String content = extractContent(response);
-        String jsonCandidate = extractJsonObject(normalizeJson(content));
-
-        try {
-            return parseModule(jsonCandidate);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse module response. Raw content: " + summarize(content),
-                e
-            );
-        }
-    }
-
-    private List<String> generateInterviewQuestions(String userPrompt, String jobTitle) {
-        String prompt = """
-            You are an interviewer. Return ONLY valid JSON:
-            { "questions": ["string", "string", "string", "string", "string"] }
-            Generate 5 mock interview questions tailored to the role.
-            Questions must be short-answer, practical, and role-specific. Avoid trivia or syntax-only questions.
-            """;
-
-        String userContent = String.format(
-            "Job Title: %s%nJob Description:%n%s",
-            jobTitle == null ? "" : jobTitle,
-            userPrompt
-        );
-
-        List<Map<String, String>> messages = List.of(
-            Map.of("role", "system", "content", prompt),
-            Map.of("role", "user", "content", userContent)
-        );
-
-        Map<?, ?> response = postChat(messages, 0.4, 400);
-
-        String content = extractContent(response);
-        String jsonCandidate = extractJsonObject(normalizeJson(content));
-
-        try {
-            return parseInterviewQuestions(jsonCandidate);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                "Failed to parse interview questions. Raw content: " + summarize(content),
-                e
-            );
-        }
-    }
-
-    public com.yourname.aiprep.model.ReviewAnswerResponse reviewMockAnswer(
-        com.yourname.aiprep.model.ReviewAnswerRequest request
-    ) {
+    public ReviewAnswerResponse reviewMockAnswer(ReviewAnswerRequest request) {
         String systemPrompt = """
             You are a technical interviewer. Review the candidate's answer and provide constructive feedback.
             Return ONLY valid JSON, no markdown, no explanation. Use this exact structure:
@@ -283,9 +150,7 @@ public class GroqService {
         }
     }
 
-    public com.yourname.aiprep.model.IdealAnswerResponse generateIdealAnswer(
-        com.yourname.aiprep.model.ReviewAnswerRequest request
-    ) {
+    public IdealAnswerResponse generateIdealAnswer(ReviewAnswerRequest request) {
         String systemPrompt = """
             You are a senior interviewer. Provide an ideal, concise answer to the question.
             Return ONLY valid JSON, no markdown, no explanation. Use this exact structure:
@@ -375,31 +240,29 @@ public class GroqService {
             || lower.contains("tokens");
     }
 
-    // MCQ flow removed; short-answer interview questions only.
-
     private String extractContent(Map<?, ?> response) {
         if (response == null) {
-            throw new IllegalStateException("Empty Grok response");
+            throw new IllegalStateException("Empty groq response");
         }
 
         Object choicesObj = response.get("choices");
         if (!(choicesObj instanceof List<?> choices) || choices.isEmpty()) {
-            throw new IllegalStateException("Grok response missing choices");
+            throw new IllegalStateException("groq response missing choices");
         }
 
         Object firstChoice = choices.get(0);
         if (!(firstChoice instanceof Map<?, ?> firstChoiceMap)) {
-            throw new IllegalStateException("Grok response choice is not an object");
+            throw new IllegalStateException("groq response choice is not an object");
         }
 
         Object messageObj = firstChoiceMap.get("message");
         if (!(messageObj instanceof Map<?, ?> messageMap)) {
-            throw new IllegalStateException("Grok response missing message");
+            throw new IllegalStateException("groq response missing message");
         }
 
         Object contentObj = messageMap.get("content");
         if (!(contentObj instanceof String content)) {
-            throw new IllegalStateException("Grok response content is not a string");
+            throw new IllegalStateException("groq response content is not a string");
         }
 
         return content;
@@ -447,46 +310,38 @@ public class GroqService {
         return sanitized.substring(0, 500) + "...";
     }
 
-    private CourseGuide parseCourseGuide(String json) throws JsonProcessingException {
+    private MockInterviewSession parseMockInterviewSession(String json)
+        throws JsonProcessingException {
         try {
-            return objectMapper.readValue(json, CourseGuide.class);
+            return objectMapper.readValue(json, MockInterviewSession.class);
         } catch (JsonProcessingException strictError) {
             ObjectMapper lenient = objectMapper.copy()
                 .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, CourseGuide.class);
+            return lenient.readValue(json, MockInterviewSession.class);
         }
     }
 
-    private com.yourname.aiprep.model.ReviewAnswerResponse parseReview(String json)
+    private ReviewAnswerResponse parseReview(String json)
         throws JsonProcessingException {
         try {
-            return objectMapper.readValue(
-                json,
-                com.yourname.aiprep.model.ReviewAnswerResponse.class
-            );
+            return objectMapper.readValue(json, ReviewAnswerResponse.class);
         } catch (JsonProcessingException strictError) {
             ObjectMapper lenient = objectMapper.copy()
                 .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
                 .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(
-                json,
-                com.yourname.aiprep.model.ReviewAnswerResponse.class
-            );
+            return lenient.readValue(json, ReviewAnswerResponse.class);
         }
     }
 
-    private com.yourname.aiprep.model.IdealAnswerResponse parseIdealAnswer(String json)
+    private IdealAnswerResponse parseIdealAnswer(String json)
         throws JsonProcessingException {
         try {
-            return objectMapper.readValue(
-                json,
-                com.yourname.aiprep.model.IdealAnswerResponse.class
-            );
+            return objectMapper.readValue(json, IdealAnswerResponse.class);
         } catch (JsonProcessingException strictError) {
             ObjectMapper lenient = objectMapper.copy()
                 .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
@@ -496,7 +351,7 @@ public class GroqService {
             JsonNode node = lenient.readTree(json);
             JsonNode answerNode = node.has("answer") ? node.get("answer") : node;
             String answer = coerceAnswer(answerNode);
-            return new com.yourname.aiprep.model.IdealAnswerResponse(answer);
+            return new IdealAnswerResponse(answer);
         }
     }
 
@@ -536,76 +391,32 @@ public class GroqService {
         return node.asText();
     }
 
-    private Outline parseOutline(String json) throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, Outline.class);
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, Outline.class);
-        }
-    }
-
-    private CourseGuide.Module parseModule(String json) throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, CourseGuide.Module.class);
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, CourseGuide.Module.class);
-        }
-    }
-
-    private List<String> parseInterviewQuestions(String json) throws JsonProcessingException {
-        try {
-            return objectMapper.readValue(json, InterviewQuestions.class).questions();
-        } catch (JsonProcessingException strictError) {
-            ObjectMapper lenient = objectMapper.copy()
-                .configure(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_SINGLE_QUOTES.mappedFeature(), true)
-                .configure(JsonReadFeature.ALLOW_TRAILING_COMMA.mappedFeature(), true);
-            return lenient.readValue(json, InterviewQuestions.class).questions();
-        }
-    }
-
-    private String buildCourseGuidePrompt(boolean strictJson, int compactLevel) {
+    private String buildInterviewPrompt(boolean strictJson, int compactLevel) {
         String base = """
-            You are a curriculum designer. Given a user prompt, return a SHORT structured JSON study guide
-            in a Coursera-like style plus a mock interview. Return ONLY valid JSON, no markdown, no explanation.
+            You are a senior interviewer. Return ONLY valid JSON.
             Use this exact structure:
             {
               "jobTitle": "string",
-              "overview": "string",
-              "modules": [
-                {
-                  "title": "string",
-                  "description": "string",
-                  "resources": ["string - book, article, or course recommendation"]
-                }
-              ],
-              "mockInterviewQuestions": ["string", "string", "string"]
+              "questions": ["string", "string", "string"]
             }
-            Generate 3-4 modules. Generate 6-8 interview-style questions.
+            Generate 8-10 short-answer interview questions tailored to the role.
+            Include exactly 5 technical questions based on the job description's required tools/stack.
+            The rest can be experience, leadership, or problem-solving questions.
+            Technical questions should be concrete (e.g., if React is required, ask about useMemo, hydration vs render, state management tradeoffs).
+            Avoid trivia or syntax-only questions.
             """;
 
         if (compactLevel >= 1) {
             base = base.replace(
-                "Generate 3-4 modules. Generate 6-8 interview-style questions.",
-                "Generate 3 modules. Generate 5 interview-style questions."
+                "Generate 8-10 short-answer interview questions tailored to the role.",
+                "Generate 6 short-answer interview questions tailored to the role."
             );
         }
 
         if (compactLevel >= 2) {
             base = base.replace(
-                "Generate 3 modules. Generate 5 interview-style questions.",
-                "Generate 2 modules. Generate 4 interview-style questions."
+                "Generate 6 short-answer interview questions tailored to the role.",
+                "Generate 5 short-answer interview questions tailored to the role."
             );
         }
 
@@ -657,14 +468,4 @@ public class GroqService {
         }
         return depth == 0 && trimmed.endsWith("}");
     }
-
-    private record Outline(
-        String jobTitle,
-        String overview,
-        List<ModuleOutline> modules
-    ) {
-        private record ModuleOutline(String title, String description) {}
-    }
-
-    private record InterviewQuestions(List<String> questions) {}
 }
